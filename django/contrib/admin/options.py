@@ -24,7 +24,7 @@ from django.core.exceptions import (
     FieldDoesNotExist, FieldError, PermissionDenied, ValidationError,
 )
 from django.core.paginator import Paginator
-from django.db import models, router, transaction
+from django.db import models, router, transaction, DatabaseError
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields import BLANK_CHOICE_DASH
 from django.forms.formsets import DELETION_FIELD_NAME, all_valid
@@ -1030,6 +1030,12 @@ class ModelAdmin(BaseModelAdmin):
         for formset in formsets:
             self.save_formset(request, form, formset, change=change)
 
+    def handle_database_error(self, request, error, obj, form, change):
+        """
+        Given an exception from the database, add it as a form error.
+        """
+        form.add_error(None, str(error))
+
     def render_change_form(self, request, context, add=False, change=False, form_url='', obj=None):
         opts = self.model._meta
         app_label = opts.app_label
@@ -1446,15 +1452,20 @@ class ModelAdmin(BaseModelAdmin):
                 new_object = form.instance
             formsets, inline_instances = self._create_formsets(request, new_object, change=not add)
             if all_valid(formsets) and form_validated:
-                self.save_model(request, new_object, form, not add)
-                self.save_related(request, form, formsets, not add)
-                change_message = self.construct_change_message(request, form, formsets, add)
-                if add:
-                    self.log_addition(request, new_object, change_message)
-                    return self.response_add(request, new_object)
+                try:
+                    self.save_model(request, new_object, form, not add)
+                    self.save_related(request, form, formsets, not add)
+                except DatabaseError as error:
+                    self.handle_database_error(request, error, obj, form, not add)
+                    form_validated = False
                 else:
-                    self.log_change(request, new_object, change_message)
-                    return self.response_change(request, new_object)
+                    change_message = self.construct_change_message(request, form, formsets, add)
+                    if add:
+                        self.log_addition(request, new_object, change_message)
+                        return self.response_add(request, new_object)
+                    else:
+                        self.log_change(request, new_object, change_message)
+                        return self.response_change(request, new_object)
             else:
                 form_validated = False
         else:
